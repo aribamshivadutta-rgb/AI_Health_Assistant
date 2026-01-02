@@ -1,0 +1,68 @@
+1.disease and symptoms
+                data
+                    pre data provided from internet
+                    + renforced learning from users
+                preprocessing
+                            now looks in raw file for the data to be processed and saves in the
+                            diseases and symptoms clean
+                training model
+                            it gets the data from the diseases and symptoms clean
+                            and creats the train model in the model directory as lgbm_model_clean.pkl
+                Testing model prediction
+                            it launches the pre train model from lgbm_model_clean.pkl and works with the correct
+                            symptoms as the data set is scarce
+2.Chat bot
+                data
+                     the strater data is generated and place in the Chat_bot_verified_vocab_and_user_input directory
+                     + can learn new words from users
+                preprocessing
+                            now looks in raw file for the data in the Chat_bot_verified_vocab_and_user_input
+                            directory i.e to be processed and saves in the chat_bot_clean
+                training model
+                              it gets the data from the chat_bot_clean
+                            and create the train model in the model directory as naive_bayes_model.pkl
+                Testing model run
+                            Conservation can now be held regarding the symptoms and disease
+3.Logger
+           this is added to train the user input data where it cross checks the data with the varified health
+           sector
+
+
+29/11/2025
+update
+1.Added a pipeline to handle all the task when the code is run
+2.Logger now controls the when to run the preprocessing and train for both the deseases and chat bot * old logger file is stored in another log directory in bin file
+3. chat_bot_preprocessing contains a new code in dormaint condition which fetches new predicted disease symptoms from WHO
+4. run_chatbot has the code to give the WHO precaution fo the specific disaeses ( Not yet fully tested)
+5. Chat bot needed a way to enable logger trigger which is done the pipe line also need one so it is also added.
+    in both the chat bot and the piple when run i displays to add new disease typr "Do you know 'type Disease here'"
+    have added *common cold as a test sample
+6. now the current accuracy for training model is 67%, 11/30/2025 70% and the predicted is 52%
+7.all the lgms has been updated to work with each other
+8. have use a tuning scrip to find the best setting for the disease and symptoms train model
+
+
+ to be fixed(done)
+  1.pipeline will run in to error if the chat bot is updates and when reverted to old code it still works ( Fixed)
+  2. fix chat bot disease prediction as the dieases prideced is not correcerd when compared to pedicted_lgbm is run ( Fixed)
+  3. need to check disease and symptom code as it cant predict respiratory track infection like it used to ( Fixed)
+  4. Check if the logger is getting data for new disease (Fixed)
+
+update 11/30/2025
+1. now the logger is working as intended it goes to sleep and wakes up after 30 mis to check if there is new unverified data
+   and a quick trigger "verify now" to verify it quickly
+2. there has been a new update for the run chatbot which handles disease with imilar csymptoms * this has ot been implemented
+   and has been left out for future update
+to be fixed
+1. chatbot is triggering autometicaly when ever new word has been entered
+2.check / remove the disease verified source from the "raw/Chat_bot_verified_vocab_and_user_input"
+
+ to be added
+1. chat bot to give precaution using the who database with regard to the disease predict or just casual info by about a diseae by user(Done)
+2. need to test if the logger i.e training by user is working (Done)
+3. how to run all this code one time( Done)
+4. hand shaking with the chat bot and the diseases and symptoms to give the user the correct disease (Done)
+5. need to design the web features to logging in from website i.e web interface
+6. how to save the project for carry
+7. need to add separate csv for training user input chat dataset
+8. is it possible for the user to get symptoms from disease and disease from symptoms in the disease and symptoms file(Done)

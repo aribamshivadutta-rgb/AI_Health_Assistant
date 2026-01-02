@@ -1,0 +1,481 @@
+""" old Logger with no trigger to run the preprocess and train for both diseases and chat bot
+"""
+import pandas as pd
+import os
+import datetime
+import csv
+import requests
+from bs4 import BeautifulSoup
+from datetime import timedelta
+import re
+
+# =======================
+# CONFIGURATION
+# =======================
+# Update this path if your project is in a different location
+BASE_DIR = r"D:\AI_Health_Assistant\data"
+RAW_DIR = os.path.join(BASE_DIR, "raw")
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
+TEMP_DIR = os.path.join(BASE_DIR, "temp")
+
+# 1. Staging files (Temporary / Unverified)
+UNVERIFIED_DISEASE_FILE = os.path.join(TEMP_DIR, "unverified_diseases.csv")
+UNVERIFIED_VOCAB_FILE = os.path.join(TEMP_DIR, "unverified_vocab.csv")
+UNVERIFIED_INTENT_FILE = os.path.join(TEMP_DIR, "unverified_intents.csv")
+
+# 2. Production files (Verified / Training Ready)
+LEARNED_DATA_FILE = os.path.join(RAW_DIR, "learned_user_data.csv")
+VERIFIED_VOCAB_FILE = os.path.join(RAW_DIR, "verified_vocab.csv")
+VERIFIED_INTENT_FILE = os.path.join(RAW_DIR, "chatbot_intents.csv")
+VERIFIED_METADATA_FILE = os.path.join(RAW_DIR, "verified_disease_sources.csv")
+
+# 3. Logs
+CHAT_LOG_FILE = os.path.join(LOGS_DIR, "chat_history.csv")
+
+# 4. Settings
+AUTO_VERIFY_DELAY_MINUTES = 30
+TRIGGER_PHRASE = "do you know"
+
+COMMON_SYMPTOMS_LIST = [
+    "fever", "cough", "fatigue", "headache", "nausea", "vomiting", "diarrhea",
+    "pain", "rash", "shortness of breath", "dizziness", "chills", "sore throat",
+    "runny nose", "congestion", "sneezing", "muscle ache", "confusion",
+    "chest pain", "tremor", "sweating", "swelling", "itching", "redness"
+]
+
+# 5. Starter Data (Seeded on first run)
+STARTER_VOCAB = [
+    {"word": "tummy ache", "meaning_or_synonym": "abdominal pain"},
+    {"word": "feeling hot", "meaning_or_synonym": "fever"},
+    {"word": "puking", "meaning_or_synonym": "vomiting"},
+    {"word": "throwing up", "meaning_or_synonym": "vomiting"},
+    {"word": "runs", "meaning_or_synonym": "diarrhea"},
+    {"word": "hurt head", "meaning_or_synonym": "headache"},
+    {"word": "can't breathe", "meaning_or_synonym": "shortness of breath"},
+    {"word": "passing out", "meaning_or_synonym": "syncope"},
+    {"word": "shakes", "meaning_or_synonym": "tremor"},
+    {"word": "high temp", "meaning_or_synonym": "fever"},
+    {"word": "belly pain", "meaning_or_synonym": "abdominal pain"},
+    {"word": "dizzy", "meaning_or_synonym": "dizziness"},
+    {"word": "tired", "meaning_or_synonym": "fatigue"},
+    {"word": "exhausted", "meaning_or_synonym": "fatigue"}
+]
+
+STARTER_INTENTS = [
+    {"intent_trigger": "hello", "bot_response": "Hello! I am your AI Health Assistant. How can I help you today?"},
+    {"intent_trigger": "hi", "bot_response": "Hi there! Please tell me your symptoms."},
+    {"intent_trigger": "who are you",
+     "bot_response": "I am an AI trained to help identify potential health issues based on symptoms."},
+    {"intent_trigger": "help", "bot_response": "Please type your symptoms separated by commas (e.g. fever, cough)."},
+    {"intent_trigger": "bye", "bot_response": "Take care! Remember to consult a doctor for a professional diagnosis."},
+    {"intent_trigger": "thank you", "bot_response": "You're welcome! Stay healthy."},
+    {"intent_trigger": "what can you do",
+     "bot_response": "I can analyze symptoms and predict potential conditions, or learn new diseases if you teach me."}
+]
+
+# Ensure directories exist
+os.makedirs(RAW_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+
+# =======================
+# STARTER DATA GENERATOR
+# =======================
+def generate_starter_data():
+    """Generates starter datasets if they don't exist."""
+    print("[System] Checking for starter data...")
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 1. Generate Vocab
+    if not os.path.exists(VERIFIED_VOCAB_FILE):
+        print(f" -> Creating {VERIFIED_VOCAB_FILE} with starter vocabulary.")
+        with open(VERIFIED_VOCAB_FILE, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['word', 'meaning_or_synonym', 'verified_at'])
+            writer.writeheader()
+            for item in STARTER_VOCAB:
+                writer.writerow({
+                    'word': item['word'],
+                    'meaning_or_synonym': item['meaning_or_synonym'],
+                    'verified_at': timestamp
+                })
+    else:
+        print(f" -> {os.path.basename(VERIFIED_VOCAB_FILE)} already exists.")
+
+    # 2. Generate Intents
+    if not os.path.exists(VERIFIED_INTENT_FILE):
+        print(f" -> Creating {VERIFIED_INTENT_FILE} with starter intents.")
+        with open(VERIFIED_INTENT_FILE, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['intent_trigger', 'bot_response', 'verified_at'])
+            writer.writeheader()
+            for item in STARTER_INTENTS:
+                writer.writerow({
+                    'intent_trigger': item['intent_trigger'],
+                    'bot_response': item['bot_response'],
+                    'verified_at': timestamp
+                })
+    else:
+        print(f" -> {os.path.basename(VERIFIED_INTENT_FILE)} already exists.")
+
+    # 3. Ensure Learned Data File exists (Header only if new)
+    if not os.path.exists(LEARNED_DATA_FILE):
+        print(f" -> Initializing {LEARNED_DATA_FILE}.")
+        # Create with a basic header to avoid read errors later
+        with open(LEARNED_DATA_FILE, 'w', newline='', encoding='utf-8') as f:
+            # Just 'prognosis' initially, other columns added dynamically
+            f.write("prognosis,fever,cough\n")
+    else:
+        print(f" -> {os.path.basename(LEARNED_DATA_FILE)} already exists.")
+
+
+# =======================
+# TRIGGER HANDLER
+# =======================
+def check_trigger_and_process(user_input):
+    """
+    Checks if the user input starts with 'do you know'.
+    If so, auto-submits the disease name for verification.
+    """
+    clean_input = user_input.strip().lower()
+
+    if clean_input.startswith(TRIGGER_PHRASE):
+        # Extract disease name, e.g., "do you know cholera" -> "cholera"
+        potential_disease = user_input[len(TRIGGER_PHRASE):].strip(" ?.,")
+
+        if potential_disease:
+            submit_unverified_disease(potential_disease)
+            return True, f"I see you're asking about '{potential_disease}'. I'm not fully trained on it yet, but I've added it to my verification queue. I will check WHO and Wikipedia for it now."
+
+    return False, None
+
+
+# =======================
+# LOGGING & SUBMISSION
+# =======================
+def log_interaction(user_input_symptoms, predicted_disease, confidence, user_verification):
+    """Logs the raw conversation details."""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = {
+        "timestamp": timestamp,
+        "user_input": user_input_symptoms,
+        "ai_prediction": predicted_disease,
+        "confidence": confidence,
+        "status": user_verification
+    }
+    _append_to_csv(CHAT_LOG_FILE, log_entry)
+
+
+def submit_unverified_disease(disease_name, symptoms_list=None):
+    """Submits a disease to the temp queue."""
+    print(f"\n[Staging] Submitting unverified disease: {disease_name}")
+    symptoms_str = "PENDING_EXTRACTION" if symptoms_list is None else "|".join(symptoms_list)
+    entry = {
+        'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'source_url_or_note': "Pending Auto-Discovery",
+        'proposed_disease': disease_name,
+        'symptoms_list': symptoms_str
+    }
+    _append_to_csv(UNVERIFIED_DISEASE_FILE, entry)
+    print(f"[Success] Saved. System will check WHO/Wikipedia in {AUTO_VERIFY_DELAY_MINUTES} mins.")
+
+
+def submit_unverified_vocabulary(word, meaning):
+    """Submits a synonym word to the temp queue."""
+    print(f"\n[Staging] Submitting new vocabulary: {word}")
+    entry = {
+        'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'word': word,
+        'meaning_or_synonym': meaning
+    }
+    _append_to_csv(UNVERIFIED_VOCAB_FILE, entry)
+    print(f"[Success] Saved to staging.")
+
+
+def submit_unverified_intent(trigger, response):
+    """Submits a new Q&A pair (Intent) for the chatbot."""
+    print(f"\n[Staging] Submitting new intent: {trigger} -> {response}")
+    entry = {
+        'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'intent_trigger': trigger,
+        'bot_response': response
+    }
+    _append_to_csv(UNVERIFIED_INTENT_FILE, entry)
+    print(f"[Success] Saved to staging.")
+
+
+# =======================
+# AUTOMATED ONLINE VERIFICATION
+# =======================
+def _search_and_verify_disease(disease_name):
+    """Searches WHO and Wikipedia for disease validation and symptom extraction."""
+    print(f"[Auto-Verify] Searching internet for: '{disease_name}'...")
+    headers = {'User-Agent': 'HealthAssistantBot/1.0 (Research Project)'}
+
+    # 1. Check WHO
+    slug = disease_name.lower().strip().replace(' ', '-')
+    who_url = f"https://www.who.int/health-topics/{slug}"
+    try:
+        who_resp = requests.get(who_url, headers=headers, timeout=5)
+        if who_resp.status_code == 200 and "Page not found" not in who_resp.text:
+            symptoms = _extract_symptoms_from_html(who_resp.text)
+            return True, who_url, "Verified on WHO", symptoms
+    except:
+        pass
+
+    # 2. Check Wikipedia
+    search_url = "https://en.wikipedia.org/w/api.php"
+    params = {"action": "opensearch", "search": disease_name, "limit": 1, "namespace": 0, "format": "json"}
+    try:
+        resp = requests.get(search_url, params=params, headers=headers, timeout=10)
+        data = resp.json()
+        if data[1]:
+            best_url = data[3][0]
+            page_resp = requests.get(best_url, headers=headers, timeout=10)
+            if page_resp.status_code == 200:
+                text = BeautifulSoup(page_resp.text, 'html.parser').get_text().lower()
+                keywords = ['symptom', 'diagnosis', 'treatment', 'disease', 'medical']
+                # Ensure it's a medical page, not a movie/game
+                if any(kw in text for kw in keywords):
+                    symptoms = _extract_symptoms_from_html(page_resp.text)
+                    return True, best_url, "Verified on Wikipedia", symptoms
+    except Exception as e:
+        return False, "", f"Error: {e}", []
+
+    return False, "", "No matching reputable sources found", []
+
+
+def _extract_symptoms_from_html(html_text):
+    """Scans HTML text for common symptoms."""
+    soup = BeautifulSoup(html_text, 'html.parser')
+    text = soup.get_text().lower()
+    found = []
+    for s in COMMON_SYMPTOMS_LIST:
+        if re.search(r'\b' + re.escape(s) + r'\b', text):
+            found.append(s)
+    return list(set(found))
+
+
+# =======================
+# AUTO-VERIFICATION LOGIC
+# =======================
+def process_pending_verifications():
+    """Main function to check temp files and promote data if verified."""
+    print("\n[System] Checking for pending auto-verifications...")
+    now = datetime.datetime.now()
+    threshold = now - timedelta(minutes=AUTO_VERIFY_DELAY_MINUTES)
+
+    # Process Diseases
+    if os.path.exists(UNVERIFIED_DISEASE_FILE):
+        _process_diseases(UNVERIFIED_DISEASE_FILE, threshold)
+
+    # Process Vocab
+    if os.path.exists(UNVERIFIED_VOCAB_FILE):
+        _process_generic(UNVERIFIED_VOCAB_FILE, threshold, _promote_vocab)
+
+    # Process Intents
+    if os.path.exists(UNVERIFIED_INTENT_FILE):
+        _process_generic(UNVERIFIED_INTENT_FILE, threshold, _promote_intent)
+
+
+def _process_diseases(source_file, threshold_time):
+    try:
+        df = pd.read_csv(source_file)
+        if df.empty: return
+        df['timestamp_dt'] = pd.to_datetime(df['timestamp'])
+        rows_to_keep = []
+
+        for index, row in df.iterrows():
+            if row['timestamp_dt'] < threshold_time:
+                verified, found_url, msg, extracted_symptoms = _search_and_verify_disease(row['proposed_disease'])
+                if verified:
+                    print(f" -> VERIFIED: {row['proposed_disease']} (Source: {found_url})")
+                    row['source_url_or_note'] = found_url
+                    if extracted_symptoms:
+                        row['symptoms_list'] = "|".join(extracted_symptoms)
+                    elif pd.isna(row['symptoms_list']) or row['symptoms_list'] == "PENDING_EXTRACTION":
+                        row['symptoms_list'] = ""
+                    _promote_disease(row)
+                else:
+                    print(f" -> FAILED: {row['proposed_disease']} - {msg}")
+                    rows_to_keep.append(row)
+            else:
+                rows_to_keep.append(row)
+
+        if rows_to_keep:
+            pd.DataFrame(rows_to_keep).drop(columns=['timestamp_dt'], errors='ignore').to_csv(source_file, index=False)
+        else:
+            open(source_file, 'w').close()
+            with open(source_file, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=['timestamp', 'source_url_or_note', 'proposed_disease',
+                                                       'symptoms_list'])
+                writer.writeheader()
+    except Exception as e:
+        print(f"[Error] Processing disease verification: {e}")
+
+
+def _process_generic(source_file, threshold_time, processor_func):
+    try:
+        df = pd.read_csv(source_file)
+        if df.empty: return
+        df['timestamp_dt'] = pd.to_datetime(df['timestamp'])
+        ready = df[df['timestamp_dt'] < threshold_time]
+        pending = df[df['timestamp_dt'] >= threshold_time]
+
+        for _, row in ready.iterrows():
+            processor_func(row)
+
+        pending.drop(columns=['timestamp_dt'], errors='ignore').to_csv(source_file, index=False)
+    except Exception as e:
+        print(f"[Error] Verification: {e}")
+
+
+def _promote_disease(row):
+    """Moves verified disease to training data."""
+    disease = row['proposed_disease']
+    symptoms_str = str(row['symptoms_list'])
+    if symptoms_str and symptoms_str != "nan" and symptoms_str != "PENDING_EXTRACTION":
+        symptoms = symptoms_str.split("|")
+    else:
+        symptoms = []
+
+    new_entry = {'prognosis': disease}
+    for s in symptoms:
+        if s: new_entry[s.strip().lower().replace(' ', '_')] = 1
+
+    _append_to_csv_smart(LEARNED_DATA_FILE, new_entry)
+    meta_entry = {'disease': disease, 'source_url': row.get('source_url_or_note', 'Unknown'),
+                  'verified_at': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    _append_to_csv(VERIFIED_METADATA_FILE, meta_entry)
+
+
+def _promote_vocab(row):
+    """Moves verified vocab to production file."""
+    entry = {'word': row['word'], 'meaning_or_synonym': row['meaning_or_synonym'],
+             'verified_at': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    _append_to_csv(VERIFIED_VOCAB_FILE, entry)
+
+
+def _promote_intent(row):
+    """Moves verified intent to production file."""
+    entry = {'intent_trigger': row['intent_trigger'], 'bot_response': row['bot_response'],
+             'verified_at': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    _append_to_csv(VERIFIED_INTENT_FILE, entry)
+    print(f" -> Promoted Intent: '{row['intent_trigger']}'")
+
+
+# =======================
+# HELPERS
+# =======================
+def _append_to_csv(filepath, dict_data):
+    file_exists = os.path.exists(filepath) and os.path.getsize(filepath) > 0
+    with open(filepath, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=dict_data.keys())
+        if not file_exists: writer.writeheader()
+        writer.writerow(dict_data)
+
+
+def _append_to_csv_smart(filepath, new_row_dict):
+    new_df = pd.DataFrame([new_row_dict])
+    if os.path.exists(filepath):
+        try:
+            combined = pd.concat([pd.read_csv(filepath), new_df], ignore_index=True)
+        except:
+            combined = new_df
+    else:
+        combined = new_df
+    combined.fillna(0, inplace=True)
+    combined.to_csv(filepath, index=False)
+
+
+# =======================
+# EXECUTION
+# =======================
+if __name__ == "__main__":
+    print("--- Feedback Logger Running ---")
+
+    # 1. Initialize starter data if missing
+    generate_starter_data()
+
+    # Example usage for testing
+    # submit_unverified_intent("how are you", "I am just code, but I'm functioning perfectly!")
+    # process_pending_verifications()
+
+
+    model tuning code * need powerful gpu
+    import os
+import pandas as pd
+import lightgbm as lgb
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.metrics import accuracy_score
+
+# =======================
+# CONFIGURATION
+# =======================
+BASE_DIR = r"D:\AI_Health_Assistant\data\clean\disease_and_symptom_clean"
+TRAIN_PATH = os.path.join(BASE_DIR, "train.csv")
+
+
+def tune():
+    print("--- 1. Loading Data for Tuning ---")
+    if not os.path.exists(TRAIN_PATH):
+        raise FileNotFoundError("Train file not found.")
+
+    df = pd.read_csv(TRAIN_PATH)
+    X = df.drop("disease_id", axis=1)
+    y = df["disease_id"]
+
+    print(f"Tuning on {len(X)} samples...")
+
+    # =======================
+    # 2. DEFINE GRID
+    # =======================
+    # These are the knobs we will turn to find the best setting
+    param_grid = {
+        'n_estimators': [100, 200, 300],  # How many trees?
+        'learning_rate': [0.01, 0.05, 0.1],  # How fast to learn?
+        'num_leaves': [20, 31, 50],  # How complex can a tree be?
+        'max_depth': [-1, 10, 20],  # How deep is the tree?
+        'reg_alpha': [0, 0.1, 0.5],  # L1 Regularization (prevents overfitting)
+        'reg_lambda': [0, 0.1, 0.5]  # L2 Regularization
+    }
+
+    # =======================
+    # 3. SETUP MODEL
+    # =======================
+    model = lgb.LGBMClassifier(
+        objective='multiclass',
+        metric='multi_logloss',
+        random_state=42,
+        verbose=-1
+    )
+
+    # StratifiedKFold ensures each fold has a mix of all diseases
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+
+    print("--- 3. Starting Grid Search (This takes time!) ---")
+    grid = GridSearchCV(
+        estimator=model,
+        param_grid=param_grid,
+        cv=cv,
+        scoring='accuracy',
+        n_jobs=-1,  # Use all CPU cores
+        verbose=1
+    )
+
+    grid.fit(X, y)
+
+    # =======================
+    # 4. RESULTS
+    # =======================
+    print("\n" + "=" * 30)
+    print(f"🏆 BEST ACCURACY: {grid.best_score_ * 100:.2f}%")
+    print("=" * 30)
+    print("Best Parameters found:")
+    print(grid.best_params_)
+    print("=" * 30)
+
+    print("\nCopy these parameters into your train_model.py script!")
+
+
+if __name__ == "__main__":
+    tune()
