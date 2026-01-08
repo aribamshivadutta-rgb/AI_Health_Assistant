@@ -312,6 +312,7 @@ class MedicalAI:
 def main():
     st.set_page_config(page_title="Medical AI Chat", page_icon="💬", layout="centered")
     st.title("💬 AI Health Assistant")
+    st.error("⚠️ DISCLAIMER: This is an AI-generated tool for informational purposes only. It is NOT a substitute for professional medical advice. In case of emergency, consult a doctor immediately.")
     st.caption("Describe your symptoms (e.g., 'fever, headache') or ask about a disease.")
 
     if 'bot' not in st.session_state:
